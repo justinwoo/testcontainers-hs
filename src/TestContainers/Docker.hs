@@ -168,8 +168,9 @@ import Control.Monad.Catch
     throwM,
     try,
   )
+import qualified Control.Concurrent.Async
 import Control.Monad.IO.Class (MonadIO (liftIO))
-import Control.Monad.IO.Unlift (MonadUnliftIO (withRunInIO))
+import Control.Monad.IO.Unlift (MonadUnliftIO (withRunInIO), askRunInIO)
 import Control.Monad.Reader (MonadReader (..))
 import Control.Monad.Trans.Resource
   ( ReleaseKey,
@@ -267,6 +268,7 @@ import TestContainers.Monad
 import TestContainers.Trace (Trace (..), Tracer, newTracer, withTrace)
 import Prelude hiding (error, id)
 import qualified Prelude
+import qualified Control.Concurrent.Async as Control
 
 -- | Parameters for a running a Docker container.
 --
@@ -599,38 +601,42 @@ run request = do
             ++ [[tag]]
             ++ [command | Just command <- [cmd]]
 
-  stdout <- docker configTracer dockerRun
+  runInIO <- askRunInIO
+  container <- liftIO $ Control.Concurrent.Async.async $ runInIO $ do
+      stdout <- docker configTracer dockerRun
 
-  let id :: ContainerId
-      !id =
-        -- N.B. Force to not leak STDOUT String
-        strip (pack stdout)
+      let id :: ContainerId
+          !id =
+            -- N.B. Force to not leak STDOUT String
+            strip (pack stdout)
 
-      -- Careful, this is really meant to be lazy
-      ~inspectOutput =
-        unsafePerformIO $
-          internalInspect configTracer id
+          -- Careful, this is really meant to be lazy
+          ~inspectOutput =
+            unsafePerformIO $
+              internalInspect configTracer id
 
-  -- We don't issue 'ReleaseKeys' for cleanup anymore. Ryuk takes care of cleanup
-  -- for us once the session has been closed.
-  releaseKey <- register (pure ())
+      -- We don't issue 'ReleaseKeys' for cleanup anymore. Ryuk takes care of cleanup
+      -- for us once the session has been closed.
+      releaseKey <- register (pure ())
 
-  forM_ followLogs $
-    dockerFollowLogs configTracer id
+      forM_ followLogs $
+        dockerFollowLogs configTracer id
 
-  let container =
-        Container
-          { id,
-            releaseKey,
-            image,
-            inspectOutput,
-            config
-          }
+      let container =
+            Container
+              { id,
+                releaseKey,
+                image,
+                inspectOutput,
+                config
+              }
 
-  -- Last but not least, execute the WaitUntilReady checks
-  waitUntilReady container readiness
+      -- Last but not least, execute the WaitUntilReady checks
+      waitUntilReady container readiness
 
-  pure container
+      pure container
+
+  pure $ unsafePerformIO $ Control.Concurrent.Async.wait container
 
 -- | Sets up a Ryuk 'Reaper'.
 --
